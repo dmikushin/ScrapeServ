@@ -1,7 +1,0 @@
-services:
-  scraper:
-    image: usaiinc/scraper:latest
-    ports:
-      - 5006:5006
-    # volumes:
-    #   - ./.env:/app/.env

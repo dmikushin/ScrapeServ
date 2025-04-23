@@ -1,20 +1,20 @@
 # Use the official Ubuntu base image
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install necessary packages
 RUN apt-get update && \
-    apt-get install -y \
-    python3 \
-    python3-pip \
-    redis-server \
-    wget \
-    curl \
-    gnupg2 \
-    supervisor \
-    && apt-get clean && \
+    apt-get install --no-install-recommends -y \
+        python3 \
+        python3-pip \
+        redis-server \
+        wget \
+        curl \
+        gnupg2 \
+        supervisor && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Playwright and Flask
@@ -35,7 +35,5 @@ COPY scraper /app
 
 # Expose the port the app runs on
 EXPOSE 5006
-
-COPY scraper/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

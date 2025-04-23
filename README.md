@@ -1,12 +1,8 @@
 # ScrapeServ: Simple URL to screenshots server
 
-You run the API as a web server on your machine, you send it a URL, and you get back the website data as a file plus screenshots of the site. Simple as.
+Send URL to a self-hosted Docker-based server, and get back the website data as a file plus screenshots of the site.
 
-<br/>
-<div align="center" style="display:flex;justify-content:center;margin: 2rem 0px;">
-<img alt="poster" height="350px" src="poster.webp" />
-</div>
-<br/>
+![](poster.webp)
 
 This project was made to support [Abbey](https://github.com/goodreasonai/abbey), an AI platform. Its author is [Gordon Kamer](https://x.com/gkamer8). Please leave a star if you like the project!
 
@@ -23,34 +19,14 @@ Some highlights:
 
 This web scraper is resource intensive but higher quality than many alternatives. Websites are scraped using Playwright, which launches a Firefox browser context for each job.
 
-## Setup
-
-You should have Docker and `docker compose` installed.
-
-### Easy (using pre-built image)
-
-A pre-built image is available for your use called `usaiinc/scraper`. You can use it with `docker compose` by creating a file called `docker-compose.yml` and putting the following inside it:
+## Deployment
 
 ```
-services:
-  scraper:
-    image: usaiinc/scraper:latest
-    ports:
-      - 5006:5006
-    # volumes:
-    #   - ./.env:/app/.env
+docker build -t scraper .
+docker compose up -d
 ```
 
-Then you can run it by running `docker compose up` in the same directory as your file. See the [Usage](#usage) section below on how to interact with the server!
-
-### Customizable (build from source)
-
-Another option is to clone the repo and build it yourself, which is also quite easy! This will also let you modify server settings like memory usage, the maximum length of the queue, and other default configurations.
-
-1. Clone this repo
-2. Run `docker compose up` (a `docker-compose.yml` file is provided for your use)
-
-...and the service will be available at `http://localhost:5006`. See the [Usage](#usage) section below for details on how to interact with it.
+The service will be available at `http://localhost:5006`. See the [Usage](#usage) section below for details on how to interact with it.
 
 ## Usage
 

@@ -1,8 +1,6 @@
 services:
   scraper:
-    build:
-      context: .
-      dockerfile: scraper/Dockerfile
+    image: scraper
     volumes:
       - ./scraper:/app
       - ./scraper/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf
