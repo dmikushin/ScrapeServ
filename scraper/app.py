@@ -55,12 +55,19 @@ def is_private_ip(ip_str: str) -> bool:
 
 def url_is_safe(url: str, allowed_schemes=None) -> bool:
     if allowed_schemes is None:
-        # By default, let's only allow http(s)
-        allowed_schemes = {"http", "https"}
+        # By default, allow http(s) and file
+        allowed_schemes = {"http", "https", "file"}
 
     # Parse the URL
     parsed = urlparse(url.strip())
     scheme = parsed.scheme.lower()
+
+    # Special handling for file:// URLs
+    if scheme == "file":
+        # You can add additional safety checks for file paths here if needed
+        # For example, restrict to certain directories
+        return True
+
     netloc = parsed.netloc.split(':')[0]  # extract host portion w/o port
     if scheme not in allowed_schemes:
         print(f"URL blocked: scheme '{scheme}' is not allowed.", file=sys.stderr)
@@ -123,18 +130,18 @@ def scrape():
         return jsonify({
             'error': f'Value {wait} for "wait" is unacceptable; must be between 0 and {MAX_WAIT}'
         }), 400
-    
+
     for i, name in enumerate(['width', 'height']):
         if browser_dim[i] > MAX_BROWSER_DIM[i] or browser_dim[i] < MIN_BROWSER_DIM[i]:
             return jsonify({
                 'error': f'Value {browser_dim[i]} for browser {name} is unacceptable; must be between {MIN_BROWSER_DIM[i]} and {MAX_BROWSER_DIM[i]}'
             }), 400
-        
+
     if n_screenshots > MAX_SCREENSHOTS:
         return jsonify({
                 'error': f'Value {n_screenshots} for max_screenshots is unacceptable; must be below {MAX_SCREENSHOTS}'
             }), 400
-    
+
     # Determine the image format from the Accept header
     accept_header = request.headers.get('Accept', 'image/jpeg')
     accepted_formats = {

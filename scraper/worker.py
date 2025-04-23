@@ -6,6 +6,7 @@ import tempfile
 import os
 from PIL import Image
 import sys
+import mimetypes
 
 # Server options
 MEM_LIMIT_MB = 4_000  # 4 GB memory threshold for child scraping process
@@ -36,6 +37,28 @@ def make_celery():
 
 celery = make_celery()
 
+def guess_mime_type(file_path):
+    """Guess MIME type based on file extension"""
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if mime_type:
+        return mime_type
+
+    # Default fallbacks based on extension
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in ['.html', '.htm']:
+        return 'text/html'
+    elif ext == '.pdf':
+        return 'application/pdf'
+    elif ext == '.txt':
+        return 'text/plain'
+    elif ext in ['.jpg', '.jpeg']:
+        return 'image/jpeg'
+    elif ext == '.png':
+        return 'image/png'
+
+    # Default fallback
+    return 'application/octet-stream'
+
 @celery.task
 def scrape_task(url, wait, image_format, n_screenshots, browser_dim):
 
@@ -58,7 +81,24 @@ def scrape_task(url, wait, image_format, n_screenshots, browser_dim):
         with sync_playwright() as p:
             # Should be resilient to untrusted websites
             browser = p.firefox.launch(headless=True, timeout=10_000)  # 10s startup timeout
-            context = browser.new_context(viewport={"width": browser_dim[0], "height": browser_dim[1]}, accept_downloads=True, user_agent=USER_AGENT)
+
+            # Configure browser context based on URL type
+            is_file_url = url.startswith("file://")
+
+            # Special configuration for file:// URLs
+            if is_file_url:
+                context = browser.new_context(
+                    viewport={"width": browser_dim[0], "height": browser_dim[1]},
+                    accept_downloads=True,
+                    user_agent=USER_AGENT,
+                    bypass_csp=True  # Allow file access
+                )
+            else:
+                context = browser.new_context(
+                    viewport={"width": browser_dim[0], "height": browser_dim[1]},
+                    accept_downloads=True,
+                    user_agent=USER_AGENT
+                )
 
             page = context.new_page()
 
@@ -69,65 +109,84 @@ def scrape_task(url, wait, image_format, n_screenshots, browser_dim):
             processing_download = False
 
             REDIRECT_STATUS_CODES = [301, 302, 303, 307, 308]  # Some in the 300s like Multiple Choice not included
-            
+
             # Handle response will work even if goto fails (i.e., for download).
             response = None
-            def handle_response(_response):
-                nonlocal response
-                # Check if it's the main resource
-                if _response.url == url:
-                    response = _response
-                # ...or we just got a 302 and are going to a new URL to scrape
-                elif response and response.status in REDIRECT_STATUS_CODES:
-                    response = _response
 
-            page.on("response", handle_response)
-            # Navigate to the page
-            # If there's no download, screenshotting and request stuff proceeds as normal
-            # If a download is initiated, Playwright throws an error which you can then handle
-            try:
-                response = page.goto(url)
-                if response and response.status in REDIRECT_STATUS_CODES:
-                    response = page.goto(response.headers.get('location'))
-            except PlaywrightError as e:
-                # Unfortunately, a specific error isn't thrown - have to use the substring
-                substr = "Download is starting"
-                if substr in str(e):
-                    # If I use this around the first response, a timeout will occur when there's no download.
-                    # But there's still the same exception to handle even with the expect download... playwright can be hell sometimes
-                    with page.expect_download() as download_info:
-                        try:
-                            if response and response.status in REDIRECT_STATUS_CODES:
-                                loc = response.headers.get('location')
-                                page.goto(loc)
-                            else:
-                                page.goto(url)
-                        except PlaywrightError as e:
-                            if substr in str(e):
-                                processing_download = True
-                                download = download_info.value
-                                download.save_as(content_file_tmp.name)
-                                # Note that this "response" isn't the one assigned in the try;
-                                # It's the one from handle_response
-                                status = response.status
-                                headers = response.headers
-                            else:
-                                raise e
-                else:
+            # Special handling for file:// URLs (they don't generate normal responses)
+            if is_file_url:
+                try:
+                    # For file URLs, we navigate without expecting a normal response
+                    page.goto(url)
+
+                    # For file URLs, create synthetic response information
+                    status = 200  # Assume success
+                    file_path = url[7:]  # Remove 'file://'
+                    content_type = guess_mime_type(file_path)
+                    headers = {
+                        "content-type": content_type,
+                        "source": "file"
+                    }
+                except PlaywrightError as e:
+                    print(f"Error accessing file URL: {e}", file=sys.stderr)
                     raise e
+            else:
+                # Normal HTTP(S) URL handling
+                def handle_response(_response):
+                    nonlocal response
+                    # Check if it's the main resource
+                    if _response.url == url:
+                        response = _response
+                    # ...or we just got a 302 and are going to a new URL to scrape
+                    elif response and response.status in REDIRECT_STATUS_CODES:
+                        response = _response
 
-            if not response:
-                raise Exception("Response was none")
+                page.on("response", handle_response)
 
-            status = response.status
-            headers = dict(response.headers) if response else {}
-            content_type = headers.get("content-type", "").lower()
+                # Navigate to the page
+                # If there's no download, screenshotting and request stuff proceeds as normal
+                # If a download is initiated, Playwright throws an error which you can then handle
+                try:
+                    response = page.goto(url)
+                    if response and response.status in REDIRECT_STATUS_CODES:
+                        response = page.goto(response.headers.get('location'))
+                except PlaywrightError as e:
+                    # Unfortunately, a specific error isn't thrown - have to use the substring
+                    substr = "Download is starting"
+                    if substr in str(e):
+                        # If I use this around the first response, a timeout will occur when there's no download.
+                        # But there's still the same exception to handle even with the expect download... playwright can be hell sometimes
+                        with page.expect_download() as download_info:
+                            try:
+                                if response and response.status in REDIRECT_STATUS_CODES:
+                                    loc = response.headers.get('location')
+                                    page.goto(loc)
+                                else:
+                                    page.goto(url)
+                            except PlaywrightError as e:
+                                if substr in str(e):
+                                    processing_download = True
+                                    download = download_info.value
+                                    download.save_as(content_file_tmp.name)
+                                    # Note that this "response" isn't the one assigned in the try;
+                                    # It's the one from handle_response
+                                    status = response.status
+                                    headers = response.headers
+                                else:
+                                    raise e
+                    else:
+                        raise e
 
-            if status >= 400:
-                pass
-            elif not processing_download:
+                if not response:
+                    raise Exception("Response was none")
+
                 status = response.status
-                headers = dict(response.headers)
+                headers = dict(response.headers) if response else {}
+                content_type = headers.get("content-type", "").lower()
+
+            # Common handling for both URL types
+            if is_file_url or (not processing_download and status < 400):
+                # If file URL or successful web URL
                 content_type = headers.get("content-type", "").lower()
 
                 # If this is an HTML page, take screenshots
@@ -165,11 +224,27 @@ def scrape_task(url, wait, image_format, n_screenshots, browser_dim):
                         raw_screenshot_files.append(tmp.name)
                         tmp.close()
 
-                # If not text/html, just retrieve the raw bytes
-                # Note that if not text/html, might've been caught by the download stuff above
-                file_bytes = response.body()
-                content_file_tmp.write(file_bytes)
-                browser.close()
+                # If not processing download, retrieve content
+                if not processing_download:
+                    if is_file_url:
+                        # For file URLs, copy the original file directly
+                        file_path = url[7:]  # Remove 'file://' prefix
+                        try:
+                            # Read the original file in binary mode
+                            with open(file_path, 'rb') as original_file:
+                                file_content = original_file.read()
+                                # Write to our temp file
+                                with open(content_file_tmp.name, 'wb') as f:
+                                    f.write(file_content)
+                        except Exception as e:
+                            print(f"Error reading file {file_path}: {e}", file=sys.stderr)
+                            raise e
+                    else:
+                        # For web URLs, get raw bytes
+                        file_bytes = response.body()
+                        content_file_tmp.write(file_bytes)
+
+            browser.close()
 
     except Exception as e:
         for ss in raw_screenshot_files:
