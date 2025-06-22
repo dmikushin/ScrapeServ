@@ -5,24 +5,22 @@ from dotenv import load_dotenv
 import ipaddress
 import socket
 from urllib.parse import urlparse
-import os
-from worker import scrape_task, MAX_BROWSER_DIM, MIN_BROWSER_DIM, DEFAULT_BROWSER_DIM, DEFAULT_WAIT, MAX_SCREENSHOTS, MAX_WAIT, DEFAULT_SCREENSHOTS
 import json
 import mimetypes
+from PIL import Image
+import tempfile
+from worker import scrape_task, MAX_BROWSER_DIM, MIN_BROWSER_DIM, DEFAULT_BROWSER_DIM, DEFAULT_WAIT, MAX_SCREENSHOTS, MAX_WAIT, DEFAULT_SCREENSHOTS
 
 
 app = Flask(__name__)
 
 """
-
 Flask server runs and gets requests to scrape.
-
-The server worker process spawned by gunicorn itself maintains a separate pool of scraping workers (there should be just one server worker - see Dockerfile).
-
+The server worker process spawned by gunicorn itself maintains a separate pool of scraping workers.
 Upon a request to /scrape, the gunicorn worker asks the pool for a process to run a scrape, which spawns an isolated browser context.
-
 The scrape workers' memory usage and number are limited by constants set in worker.py.
 
+Now also joins multiple screenshots vertically into a single image before returning to the client.
 """
 
 # For optional API key
@@ -101,6 +99,53 @@ def get_ext_from_content_type(content_type: str):
     return ""
 
 
+def stack_images_vertically(image_files, output_format):
+    """
+    Stack multiple images vertically into a single image.
+
+    Args:
+        image_files (list): List of paths to image files
+        output_format (str): Output image format (jpeg, png, webp)
+
+    Returns:
+        str: Path to the stacked image
+    """
+    if not image_files:
+        return None
+
+    # If only one screenshot, just return it directly
+    if len(image_files) == 1:
+        return image_files[0]
+
+    # Open all images
+    images = [Image.open(img_file) for img_file in image_files]
+
+    # Calculate the width of the final image (max width of all images)
+    max_width = max(img.width for img in images)
+
+    # Calculate the total height
+    total_height = sum(img.height for img in images)
+
+    # Create a new blank image with the calculated dimensions
+    stacked_image = Image.new('RGB', (max_width, total_height))
+
+    # Paste each image one below the other
+    y_offset = 0
+    for img in images:
+        stacked_image.paste(img, (0, y_offset))
+        y_offset += img.height
+        img.close()  # Close the image file
+
+    # Create a temporary file for the stacked image
+    fd, output_path = tempfile.mkstemp(suffix=f'.{output_format}')
+    os.close(fd)
+
+    # Save the stacked image
+    stacked_image.save(output_path, format=output_format.upper())
+
+    return output_path
+
+
 @app.route('/scrape', methods=('POST',))
 def scrape():
     if len(SCRAPER_API_KEYS):
@@ -169,55 +214,92 @@ def scrape():
         # If scrape_in_child uses too much memory, it seems to end up here.
         # however, if exit(0) is called, I find it doesn't.
         print(f"Exception raised from scraping process: {e}", file=sys.stderr, flush=True)
+        return jsonify({'error': 'Scraping process failed'}), 500
 
     successful = True if content_file else False
 
     if successful:
-        boundary = 'Boundary712sAM12MVaJff23NXJ'  # typed out some random digits
+        # Join screenshots into a single image
+        stacked_screenshot = None
+        if screenshot_files:
+            stacked_screenshot = stack_images_vertically(screenshot_files, image_format)
+
+        boundary = 'Boundary712sAM12MVaJff23NXJ'
+
+        # Store file paths for cleanup in the response object
+        cleanup_files = []
+        if content_file:
+            cleanup_files.append(content_file)
+        if stacked_screenshot:
+            cleanup_files.append(stacked_screenshot)
+        # Don't add screenshot_files to cleanup at this point
+
         # Generate a mixed multipart response
-        # See details on the standard here: https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html
         def stream():
-            # Start with headers and status as json
-            # JSON part with filename
-            filename = "info.json"
-            yield (
-                f"--{boundary}\r\n"
-                "Content-Type: application/json\r\n"
-                f"Content-Disposition: attachment; name=\"{filename}\"; filename=\"{filename}\"\r\n\r\n"
-            ).encode()
-            yield json.dumps({'status': status, 'headers': headers, 'metadata': metadata}).encode()
+            try:
+                # Start with headers and status as json
+                # JSON part with filename
+                filename = "info.json"
+                yield (
+                    f"--{boundary}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Disposition: attachment; name=\"{filename}\"; filename=\"{filename}\"\r\n\r\n"
+                ).encode()
+                yield json.dumps({'status': status, 'headers': headers, 'metadata': metadata}).encode()
 
-            # Main content (HTML/other)
-            ext = get_ext_from_content_type(headers['content-type'])
-            filename = f"main{ext}"
-            yield (
-                f"\r\n--{boundary}\r\n"
-                f"Content-Disposition: attachment; name=\"{filename}\"; filename=\"{filename}\"\r\n"
-                "Content-Transfer-Encoding: binary\r\n"
-                f"Content-Type: {headers['content-type']}\r\n\r\n"
-            ).encode()
-            with open(content_file, 'rb') as content:
-                while chunk := content.read(4096):
-                    yield chunk
-
-            # Screenshots (correct MIME type)
-            for i, ss in enumerate(screenshot_files):
-                filename = f"ss{i}.{image_format}"
+                # Main content (HTML/other)
+                ext = get_ext_from_content_type(headers['content-type'])
+                filename = f"main{ext}"
                 yield (
                     f"\r\n--{boundary}\r\n"
                     f"Content-Disposition: attachment; name=\"{filename}\"; filename=\"{filename}\"\r\n"
                     "Content-Transfer-Encoding: binary\r\n"
-                    f"Content-Type: image/{image_format}\r\n\r\n"
+                    f"Content-Type: {headers['content-type']}\r\n\r\n"
                 ).encode()
-                with open(ss, 'rb') as content:
+                with open(content_file, 'rb') as content:
                     while chunk := content.read(4096):
                         yield chunk
 
-            # Final boundary
-            yield f"\r\n--{boundary}--\r\n".encode()
+                # Combined screenshot (one file instead of many)
+                if stacked_screenshot:
+                    filename = f"screenshot.{image_format}"
+                    yield (
+                        f"\r\n--{boundary}\r\n"
+                        f"Content-Disposition: attachment; name=\"{filename}\"; filename=\"{filename}\"\r\n"
+                        "Content-Transfer-Encoding: binary\r\n"
+                        f"Content-Type: image/{image_format}\r\n\r\n"
+                    ).encode()
+                    with open(stacked_screenshot, 'rb') as content:
+                        while chunk := content.read(4096):
+                            yield chunk
 
-        return stream(), 200, {'Content-Type': f'multipart/mixed; boundary={boundary}'}
+                # Final boundary
+                yield f"\r\n--{boundary}--\r\n".encode()
 
+                # After streaming is complete, now it's safe to clean up the original screenshots
+                for file_path in screenshot_files:
+                    if os.path.exists(file_path):
+                        os.unlink(file_path)
+            except Exception as e:
+                print(f"Error during streaming: {e}", file=sys.stderr)
+
+            finally:
+                # Clean up files after stream is complete
+                for file_path in cleanup_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.unlink(file_path)
+                    except Exception as e:
+                        print(f"Error cleaning up file {file_path}: {e}", file=sys.stderr)
+
+        # Return the streaming response
+        response = app.response_class(
+            stream(),
+            status=200,
+            mimetype=f'multipart/mixed; boundary={boundary}'
+        )
+
+        return response
     else:
         return jsonify({
             'error': "This is a generic error message; sorry about that."
