@@ -2,14 +2,12 @@
 
 Send URL to a self-hosted Docker-based server, and get back the website data as a file plus screenshots of the site.
 
-![](poster.webp)
-
 This project was made to support [Abbey](https://github.com/goodreasonai/abbey), an AI platform. Its author is [Gordon Kamer](https://x.com/gkamer8). Please leave a star if you like the project!
 
 Some highlights:
-- Scrolls through the page and takes screenshots of different sections
+- Scrolls through the page and takes screenshots of the whole page
 - Runs in a docker container
-- Browser-based (will run websites' Javascript)
+- Browser-based (internally deploys Firefox, which will run websites' Javascript)
 - Gives you the HTTP status code and headers from the first request
 - Automatically handles redirects
 - Handles download links properly
